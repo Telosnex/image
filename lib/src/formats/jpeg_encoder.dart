@@ -577,7 +577,7 @@ class JpegEncoder extends Encoder {
   }
 
   // DCT & quantization core
-  Int32List _fDCTQuant(List<double> data, List<double> fdtbl) {
+  void _fDCTQuant(List<double> data, List<double> fdtbl) {
     // Pass 1: process rows.
     var dataOff = 0;
     for (var i = 0; i < 8; ++i) {
@@ -690,16 +690,14 @@ class JpegEncoder extends Encoder {
       dataOff++; // advance pointer to next column
     }
 
-    // Quantize/descale the coefficients
+    // Quantize/descale the coefficients, writing directly in zigzag order
     for (var i = 0; i < 64; ++i) {
       // Apply the quantization and scaling factor & Round to nearest integer
       final fDCTQuant = data[i] * fdtbl[i];
-      _outputfDCTQuant[i] = (fDCTQuant > 0.0)
+      _du[_zigzag[i]] = (fDCTQuant > 0.0)
           ? ((fDCTQuant + 0.5).toInt())
           : ((fDCTQuant - 0.5).toInt());
     }
-
-    return _outputfDCTQuant;
   }
 
   void _writeAPP0(OutputBuffer out) {
@@ -859,12 +857,7 @@ class JpegEncoder extends Encoder {
   ) {
     final eob = htac[0x00]!;
     final m16Zeroes = htac[0xf0]!;
-    final duDct = _fDCTQuant(cdu, fdtbl);
-
-    // ZigZag reorder
-    for (var j = 0; j < 64; ++j) {
-      _du[_zigzag[j]] = duDct[j];
-    }
+    _fDCTQuant(cdu, fdtbl); // Writes directly to _du in zigzag order
 
     final diff = _du[0] - dc;
     dc = _du[0];

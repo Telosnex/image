@@ -168,9 +168,10 @@ class JpegEncoder extends Encoder {
     ////////////////////////////////////////////////////////////////
 
     // Do the bit alignment of the EOI marker
-    if (_bytePos >= 0) {
-      final fillBits = [(1 << (_bytePos + 1)) - 1, _bytePos + 1];
-      _writeBits(fp, fillBits);
+    // Flush remaining bits (pad with 1s)
+    if (_bitCnt > 0) {
+      final padBits = 8 - _bitCnt;
+      _writeBitsInline(fp, (1 << padBits) - 1, padBits);
     }
 
     _writeMarker(fp, JpegMarker.eoi);
@@ -545,13 +546,17 @@ class JpegEncoder extends Encoder {
     for (var cat = 1; cat <= 15; cat++) {
       // Positive numbers
       for (var nr = nrLower; nr < nrUpper; nr++) {
-        _category[32767 + nr] = cat;
-        _bitCode[32767 + nr] = [nr, cat];
+        final idx = 32767 + nr;
+        _category[idx] = cat;
+        _bitCode[idx * 2] = nr;      // value
+        _bitCode[idx * 2 + 1] = cat; // bits
       }
       // Negative numbers
       for (var nrNeg = -(nrUpper - 1); nrNeg <= -nrLower; nrNeg++) {
-        _category[32767 + nrNeg] = cat;
-        _bitCode[32767 + nrNeg] = [nrUpper - 1 + nrNeg, cat];
+        final idx = 32767 + nrNeg;
+        _category[idx] = cat;
+        _bitCode[idx * 2] = nrUpper - 1 + nrNeg; // value
+        _bitCode[idx * 2 + 1] = cat;              // bits
       }
       nrLower <<= 1;
       nrUpper <<= 1;
@@ -572,7 +577,7 @@ class JpegEncoder extends Encoder {
   }
 
   // DCT & quantization core
-  List<int?> _fDCTQuant(List<double> data, List<double> fdtbl) {
+  Int32List _fDCTQuant(List<double> data, List<double> fdtbl) {
     // Pass 1: process rows.
     var dataOff = 0;
     for (var i = 0; i < 8; ++i) {
@@ -852,9 +857,8 @@ class JpegEncoder extends Encoder {
     List<List<int>?>? htdc,
     List<List<int>?> htac,
   ) {
-    final eob = htac[0x00];
-    final m16Zeroes = htac[0xf0];
-    int pos;
+    final eob = htac[0x00]!;
+    final m16Zeroes = htac[0xf0]!;
     final duDct = _fDCTQuant(cdu, fdtbl);
 
     // ZigZag reorder
@@ -862,79 +866,69 @@ class JpegEncoder extends Encoder {
       _du[_zigzag[j]] = duDct[j];
     }
 
-    final diff = _du[0]! - dc;
-    dc = _du[0]!;
-    // Encode dc
+    final diff = _du[0] - dc;
+    dc = _du[0];
+
+    // Encode DC
     if (diff == 0) {
-      _writeBits(out, htdc![0]!); // diff might be 0
+      _writeBitsInline(out, htdc![0]![0], htdc[0]![1]);
     } else {
-      pos = 32767 + diff;
-      _writeBits(out, htdc![_category[pos]!]!);
-      _writeBits(out, _bitCode[pos]!);
+      final pos = 32767 + diff;
+      final cat = _category[pos];
+      final h = htdc![cat]!;
+      // Combine Huffman code and value bits into single write
+      _writeBitsInline(out, (h[0] << _bitCode[pos * 2 + 1]) | _bitCode[pos * 2], h[1] + _bitCode[pos * 2 + 1]);
     }
 
     // Encode ACs
     var end0pos = 63;
-    for (; (end0pos > 0) && (_du[end0pos] == 0); end0pos--) {}
-    //end0pos = first element in reverse order !=0
+    while (end0pos > 0 && _du[end0pos] == 0) end0pos--;
+
     if (end0pos == 0) {
-      _writeBits(out, eob!);
+      _writeBitsInline(out, eob[0], eob[1]);
       return dc;
     }
 
     var i = 1;
-    int lng;
     while (i <= end0pos) {
       final startpos = i;
-      for (; (_du[i] == 0) && (i <= end0pos); ++i) {}
+      while (_du[i] == 0 && i <= end0pos) i++;
 
       var nrzeroes = i - startpos;
-      if (nrzeroes >= 16) {
-        lng = nrzeroes >> 4;
-        for (var nrmarker = 1; nrmarker <= lng; ++nrmarker) {
-          _writeBits(out, m16Zeroes!);
-        }
-        nrzeroes = nrzeroes & 0xF;
+      while (nrzeroes >= 16) {
+        _writeBitsInline(out, m16Zeroes[0], m16Zeroes[1]);
+        nrzeroes -= 16;
       }
-      pos = 32767 + _du[i]!;
-      _writeBits(out, htac[(nrzeroes << 4) + _category[pos]!]!);
-      _writeBits(out, _bitCode[pos]!);
+
+      final pos = 32767 + _du[i];
+      final cat = _category[pos];
+      final h = htac[(nrzeroes << 4) + cat]!;
+      _writeBitsInline(out, (h[0] << _bitCode[pos * 2 + 1]) | _bitCode[pos * 2], h[1] + _bitCode[pos * 2 + 1]);
       i++;
     }
 
     if (end0pos != 63) {
-      _writeBits(out, eob!);
+      _writeBitsInline(out, eob[0], eob[1]);
     }
 
     return dc;
   }
 
-  void _writeBits(OutputBuffer out, List<int> bits) {
-    final value = bits[0];
-    var posval = bits[1] - 1;
-    while (posval >= 0) {
-      if ((value & (1 << posval)) != 0) {
-        _byteNew |= 1 << _bytePos;
-      }
-      posval--;
-      _bytePos--;
-      if (_bytePos < 0) {
-        if (_byteNew == 0xff) {
-          out
-            ..writeByte(0xff)
-            ..writeByte(0);
-        } else {
-          out.writeByte(_byteNew);
-        }
-        _bytePos = 7;
-        _byteNew = 0;
-      }
+  /// Inline bit writer using 32-bit buffer for performance.
+  void _writeBitsInline(OutputBuffer out, int value, int numBits) {
+    _bitBuf = (_bitBuf << numBits) | (value & ((1 << numBits) - 1));
+    _bitCnt += numBits;
+    while (_bitCnt >= 8) {
+      _bitCnt -= 8;
+      final byte = (_bitBuf >> _bitCnt) & 0xFF;
+      out.writeByte(byte);
+      if (byte == 0xFF) out.writeByte(0); // stuff zero after 0xFF
     }
   }
 
   void _resetBits() {
-    _byteNew = 0;
-    _bytePos = 7;
+    _bitBuf = 0;
+    _bitCnt = 0;
   }
 
   final _yTable = Uint8List(64);
@@ -946,10 +940,15 @@ class JpegEncoder extends Encoder {
   late List<List<int>?> _yacHuffman;
   late List<List<int>?> _uvacHuffman;
 
-  final _bitCode = List<List<int>?>.filled(65535, null);
-  final _category = List<int?>.filled(65535, null);
-  final _outputfDCTQuant = List<int?>.filled(64, null);
-  final _du = List<int?>.filled(64, null);
+  // Typed arrays for performance (avoid nullable list overhead)
+  final _bitCode = Int32List(65535 * 2); // [value, bits] pairs stored inline
+  final _category = Int32List(65535);
+  final _outputfDCTQuant = Int32List(64);
+  final _du = Int32List(64);
+
+  // 32-bit buffer for faster bit writing
+  int _bitBuf = 0;
+  int _bitCnt = 0;
 
   final Int32List _rgbYuvTable = Int32List(2048);
   int? _currentQuality;
@@ -1461,6 +1460,5 @@ class JpegEncoder extends Encoder {
     0xfa
   ];
 
-  int _byteNew = 0;
-  int _bytePos = 7;
+  
 }

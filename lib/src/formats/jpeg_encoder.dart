@@ -577,7 +577,7 @@ class JpegEncoder extends Encoder {
   }
 
   // DCT & quantization core
-  void _fDCTQuant(List<double> data, List<double> fdtbl) {
+  void _fDCTQuant(Float32List data, Float32List fdtbl) {
     // Pass 1: process rows.
     var dataOff = 0;
     for (var i = 0; i < 8; ++i) {
@@ -849,8 +849,8 @@ class JpegEncoder extends Encoder {
 
   int _processDU(
     OutputBuffer out,
-    List<double> cdu,
-    List<double> fdtbl,
+    Float32List cdu,
+    Float32List fdtbl,
     int dc,
     List<List<int>?>? htdc,
     List<List<int>?> htac,
@@ -936,7 +936,6 @@ class JpegEncoder extends Encoder {
   // Typed arrays for performance (avoid nullable list overhead)
   final _bitCode = Int32List(65535 * 2); // [value, bits] pairs stored inline
   final _category = Int32List(65535);
-  final _outputfDCTQuant = Int32List(64);
   final _du = Int32List(64);
 
   // 32-bit buffer for faster bit writing

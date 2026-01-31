@@ -6,6 +6,7 @@ import '../color/format.dart';
 import '../exif/exif_data.dart';
 import '../image/icc_profile.dart';
 import '../image/image.dart';
+import '../image/image_data_uint8.dart';
 import '../util/output_buffer.dart';
 import 'encoder.dart';
 import 'jpeg/jpeg_marker.dart';
@@ -74,6 +75,20 @@ class JpegEncoder extends Encoder {
     final height = image.height;
 
     final backgroundColor = image.backgroundColor ?? _backgroundColor;
+    final bgR = backgroundColor.r.toInt();
+    final bgG = backgroundColor.g.toInt();
+    final bgB = backgroundColor.b.toInt();
+
+    // Check for direct buffer access (fast path)
+    Uint8List? directBuffer;
+    int numChannels = 0;
+    int rowStride = 0;
+    if (image.data is ImageDataUint8) {
+      final imageData = image.data as ImageDataUint8;
+      directBuffer = imageData.data;
+      numChannels = imageData.numChannels;
+      rowStride = width * numChannels;
+    }
 
     if (chroma == JpegChroma.yuv444) {
       // 4:4:4 chroma: process 8x8 blocks.
@@ -81,22 +96,26 @@ class JpegEncoder extends Encoder {
       final udu = Float32List(64);
       final vdu = Float32List(64);
 
-      for (int y = 0; y < height; y += 8) {
-        for (int x = 0; x < width; x += 8) {
-          _calculateYUV(
-            image,
-            x,
-            y,
-            width,
-            height,
-            ydu,
-            udu,
-            vdu,
-            backgroundColor,
-          );
-          dcy = _processDU(fp, ydu, _fdtblY, dcy, _ydcHuffman, _yacHuffman);
-          dcu = _processDU(fp, udu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
-          dcv = _processDU(fp, vdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+      if (directBuffer != null && numChannels >= 3) {
+        // Fast path: direct buffer access
+        for (int y = 0; y < height; y += 8) {
+          for (int x = 0; x < width; x += 8) {
+            _calculateYUVDirect(directBuffer, x, y, width, height,
+                numChannels, rowStride, ydu, udu, vdu, bgR, bgG, bgB);
+            dcy = _processDU(fp, ydu, _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcu = _processDU(fp, udu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
+            dcv = _processDU(fp, vdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+          }
+        }
+      } else {
+        // Slow path: use getPixel
+        for (int y = 0; y < height; y += 8) {
+          for (int x = 0; x < width; x += 8) {
+            _calculateYUV(image, x, y, width, height, ydu, udu, vdu, backgroundColor);
+            dcy = _processDU(fp, ydu, _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcu = _processDU(fp, udu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
+            dcv = _processDU(fp, vdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+          }
         }
       }
     } else {
@@ -107,60 +126,41 @@ class JpegEncoder extends Encoder {
       final sudu = Float32List(64);
       final svdu = Float32List(64);
 
-      for (int y = 0; y < height; y += 16) {
-        for (int x = 0; x < width; x += 16) {
-          _calculateYUV(
-            image,
-            x,
-            y,
-            width,
-            height,
-            ydu[0],
-            udu[0],
-            vdu[0],
-            backgroundColor,
-          );
-          _calculateYUV(
-            image,
-            x + 8,
-            y,
-            width,
-            height,
-            ydu[1],
-            udu[1],
-            vdu[1],
-            backgroundColor,
-          );
-          _calculateYUV(
-            image,
-            x,
-            y + 8,
-            width,
-            height,
-            ydu[2],
-            udu[2],
-            vdu[2],
-            backgroundColor,
-          );
-          _calculateYUV(
-            image,
-            x + 8,
-            y + 8,
-            width,
-            height,
-            ydu[3],
-            udu[3],
-            vdu[3],
-            backgroundColor,
-          );
-          _downsampleDU(sudu, udu[0], udu[1], udu[2], udu[3]);
-          _downsampleDU(svdu, vdu[0], vdu[1], vdu[2], vdu[3]);
-          dcy = _processDU(fp, ydu[0], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
-          dcy = _processDU(fp, ydu[1], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
-          dcy = _processDU(fp, ydu[2], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
-          dcy = _processDU(fp, ydu[3], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
-          dcu = _processDU(fp, sudu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
-          dcv = _processDU(fp, svdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+      if (directBuffer != null && numChannels >= 3) {
+        // Fast path: direct buffer access
+        for (int y = 0; y < height; y += 16) {
+          for (int x = 0; x < width; x += 16) {
+            _calculateYUVDirect(directBuffer, x, y, width, height, numChannels, rowStride, ydu[0], udu[0], vdu[0], bgR, bgG, bgB);
+            _calculateYUVDirect(directBuffer, x + 8, y, width, height, numChannels, rowStride, ydu[1], udu[1], vdu[1], bgR, bgG, bgB);
+            _calculateYUVDirect(directBuffer, x, y + 8, width, height, numChannels, rowStride, ydu[2], udu[2], vdu[2], bgR, bgG, bgB);
+            _calculateYUVDirect(directBuffer, x + 8, y + 8, width, height, numChannels, rowStride, ydu[3], udu[3], vdu[3], bgR, bgG, bgB);
+            _downsampleDU(sudu, udu[0], udu[1], udu[2], udu[3]);
+            _downsampleDU(svdu, vdu[0], vdu[1], vdu[2], vdu[3]);
+            dcy = _processDU(fp, ydu[0], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[1], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[2], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[3], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcu = _processDU(fp, sudu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
+            dcv = _processDU(fp, svdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+          }
+        }
+      } else {
+        // Slow path: use getPixel
+        for (int y = 0; y < height; y += 16) {
+          for (int x = 0; x < width; x += 16) {
+            _calculateYUV(image, x, y, width, height, ydu[0], udu[0], vdu[0], backgroundColor);
+            _calculateYUV(image, x + 8, y, width, height, ydu[1], udu[1], vdu[1], backgroundColor);
+            _calculateYUV(image, x, y + 8, width, height, ydu[2], udu[2], vdu[2], backgroundColor);
+            _calculateYUV(image, x + 8, y + 8, width, height, ydu[3], udu[3], vdu[3], backgroundColor);
+            _downsampleDU(sudu, udu[0], udu[1], udu[2], udu[3]);
+            _downsampleDU(svdu, vdu[0], vdu[1], vdu[2], vdu[3]);
+            dcy = _processDU(fp, ydu[0], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[1], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[2], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcy = _processDU(fp, ydu[3], _fdtblY, dcy, _ydcHuffman, _yacHuffman);
+            dcu = _processDU(fp, sudu, _fdtblUv, dcu, _uvdcHuffman, _uvacHuffman);
+            dcv = _processDU(fp, svdu, _fdtblUv, dcv, _uvdcHuffman, _uvacHuffman);
+          }
         }
       }
     }
@@ -179,6 +179,68 @@ class JpegEncoder extends Encoder {
   }
 
   static const _backgroundColor = const ConstColorRgb8(255, 255, 255);
+
+  /// Fast path YUV calculation - direct buffer access, no getPixel.
+  void _calculateYUVDirect(
+    Uint8List buffer,
+    int x,
+    int y,
+    int width,
+    int height,
+    int numChannels,
+    int rowStride,
+    Float32List ydu,
+    Float32List udu,
+    Float32List vdu,
+    int bgR,
+    int bgG,
+    int bgB,
+  ) {
+    var pos = 0;
+    for (var row = 0; row < 8; row++) {
+      var yy = y + row;
+      if (yy >= height) yy = height - 1;
+      final rowOffset = yy * rowStride;
+
+      for (var col = 0; col < 8; col++) {
+        var xx = x + col;
+        if (xx >= width) xx = width - 1;
+        final pixelOffset = rowOffset + xx * numChannels;
+
+        int r = buffer[pixelOffset];
+        int g = buffer[pixelOffset + 1];
+        int b = buffer[pixelOffset + 2];
+
+        // Alpha blending if 4+ channels
+        if (numChannels > 3) {
+          final a = buffer[pixelOffset + 3];
+          if (a < 255) {
+            final invA = 255 - a;
+            r = (r * a + bgR * invA) ~/ 255;
+            g = (g * a + bgG * invA) ~/ 255;
+            b = (b * a + bgB * invA) ~/ 255;
+          }
+        }
+
+        ydu[pos] = ((_rgbYuvTable[r] +
+                    _rgbYuvTable[g + 256] +
+                    _rgbYuvTable[b + 512]) >>
+                16) -
+            128.0;
+        udu[pos] = ((_rgbYuvTable[r + 768] +
+                    _rgbYuvTable[g + 1024] +
+                    _rgbYuvTable[b + 1280]) >>
+                16) -
+            128.0;
+        vdu[pos] = ((_rgbYuvTable[r + 1280] +
+                    _rgbYuvTable[g + 1536] +
+                    _rgbYuvTable[b + 1792]) >>
+                16) -
+            128.0;
+        pos++;
+      }
+    }
+  }
 
   void _calculateYUV(
     Image image,
